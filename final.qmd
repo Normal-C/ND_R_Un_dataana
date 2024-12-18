@@ -1,0 +1,165 @@
+---
+title: "final project"
+author: 'Eric Chang'
+format: html
+editor: visual
+---
+
+## Introduction
+
+If we want to decide to visit a place, I think the best way is to search on the Google map. However, I don't think we can just see the rating to make the decision. Other than that, I prefer to see the reviews, because they can directly tell me why this place attracts people and will notice me something I didn't know before. There are hundreds of comments to see for one hot place, so I need a fast way to tell me why this location I should go. Here, I try to use API to conclude all the reviews for my selected location and do some analysis to help me quickly edit my trip plan.
+
+Because the official Google map API needs money, so I just use a third source API, a website called serpdog.
+
+## USE API
+
+The code block below is actually the second one in the writing process, with the first code block located beneath this one. the reason is that when I try to find all information about one place with this API, I need value for data_id, but this needs to use Google search API, so you can see the code, api_key means API key, q means what you looking for search and gl for country.
+
+```{python}
+import requests
+payload = {'api_key': '65e1ddb326dd1053b1d8cfec', 'q':'Statue of Liberty' , 'gl':'us'}
+resp = requests.get('https://api.serpdog.io/search', params=payload)
+print (resp.text)
+```
+
+while it will show a lot of content, I suggest using control+F to find data_id, and the place I looking for is the Statue of Liberty, and its data_id is 0x89c25090129c363d:0x40c6a5770d25022b, which differs from the place_id if we use the official Google Map API
+
+now, with the API key and data id, I want to search all Google map reviews for the Statue of Liberty, so I just request API to find all text information and print it.
+
+```{python}
+import requests
+payload = {'api_key': '65e1ddb326dd1053b1d8cfec', 'data_id': '0x89c25090129c363d:0x40c6a5770d25022b'}
+resp = requests.get('https://api.serpdog.io/reviews', params=payload)
+print (resp.text)
+```
+
+the result like the first code chunk, is so much content that will make people tired to see, so I will do some cleaning or organization next
+
+## Analysis
+
+First, I use httr to make an HTTP request and jsonlite to hand JSON data. And use the get function to get review data, unlike the class that said to use for loop to the next page review, I use 'next page token' to request API to see if there have next page review, if not, then end the loop. Finally, I created a data frame to collect all the reviews I collected.
+
+```{r}
+library(httr)
+library(jsonlite)
+
+all_snippets <- character()
+
+payload <- list(
+  api_key = '65e1ddb326dd1053b1d8cfec',
+  data_id = '0x89c25090129c363d:0x40c6a5770d25022b'
+)
+
+repeat {
+  resp <- GET('https://api.serpdog.io/reviews', query = payload)
+  
+  data <- content(resp, "parsed", encoding = "UTF-8")
+  
+  if (!is.null(data$reviews)) {
+    
+    snippets <- sapply(data$reviews, function(review) review$snippet)
+    all_snippets <- c(all_snippets, snippets)
+  }
+  
+  if (!is.null(data$pagination$next_page_token)) {
+    payload$next_page_token <- data$pagination$next_page_token
+  } else {
+    break  }}
+
+reviews_df <- data.frame(reviews = all_snippets, stringsAsFactors = FALSE)
+
+print(reviews_df)
+
+save(reviews_df, file = "reviews_df.RData")
+
+```
+
+I didn't actually collect all the review data, because the website stipulates only 1000 API requests one day
+
+now, I will do some analysis for the review, the first thing I do is sentiment analysis because I believe the correlation between review and rating is not strong, because some people like me will make a good comment but post a low rate(Because I don't want to quarrel with others on the Internet, but I still want to express my true feelings). I use Jockers-Rinker sentiment analysis under the lexicon to give each comment its score.
+
+```{r}
+library(sentimentr)
+library(lexicon)
+library(magrittr)
+library(textcat)
+library(googleLanguageR)
+library(dplyr)
+
+
+reviews_df$Total_Sentiment_Score <- sapply(reviews_df$reviews, function(reviews) {
+  sent_scores <- sentiment(tolower(reviews), polarity_dt = lexicon::hash_sentiment_jockers_rinker)
+  total_score <- sum(sent_scores$sentiment)
+  return(total_score)
+})
+
+aver_sentiment <- mean(reviews_df$Total_Sentiment_Score, na.rm = TRUE)
+print(aver_sentiment)
+```
+
+the highest score for the Statue of Liberty is 9.63, and the lowest score is -1.62, and the average is 1.26, but like I said before, this score will affected by how many reviews are collected.
+
+After reading the review with the highest score and lowest, I had a first impression about this place, then I wanted to more analysis, next, I wanted to do a topic model analysis to see what do most people think of the Statue of Liberty
+
+```{r}
+
+library(quanteda)
+library(stm)
+library(tm)
+
+comm_token <- tokens(reviews_df$reviews)
+comm_token <- tokens_tolower(comm_token)
+comm_stop_en <- tm::stopwords("en")
+
+
+
+
+comm_token <- tokens_remove(comm_token, comm_stop_en)
+
+comm_token <- tokens_remove(comm_token, pattern = "[\\p{P}]", valuetype = "regex")
+comm_dfm <- dfm(comm_token)
+
+comm_dfm <- dfm_trim(comm_dfm, sparsity = 0.99)
+
+comm_stm <- convert(comm_dfm, to = "stm")
+doc_stm <- comm_stm$documents
+vocab_stm <- comm_stm$vocab
+prept <- prepDocuments(documents = doc_stm, vocab = vocab_stm)
+
+
+topic5 <- stm(documents = prept$documents,vocab = prept$vocab, seed = 1001, K=5, verbose = FALSE)
+
+plot(topic5)
+
+```
+
+while I didn't see clear insight from the top 5 topics, I will show you another method to do that. If we can see a clear description of one place, we can stop here and make a trip plan.
+
+I will make a word cloud to see if there is a clear insight for the Statue of Liberty. first, I use dfm function to create a document feature matrix, second, I use topfeatures function to extract the top 200 most frequently occurring words and their frequencies from the DFM. Third, I use wordcloud to make a word cloud graph with the most frequent 200 words, and the size depends on their frequency.
+
+```{r}
+library(wordcloud)
+library(RColorBrewer)
+library(quanteda)
+
+
+comm_dfm <- dfm(reviews_df$reviews, remove = stopwords("en"), remove_punct = TRUE)
+
+word_freqs <- topfeatures(comm_dfm, n = 200)  
+
+
+set.seed(1234) 
+wordcloud(names(word_freqs), 
+          freq = word_freqs, 
+          min.freq = 1,
+          max.words = 200,
+          random.order = FALSE, 
+          rot.per = 0.35, 
+          colors = brewer.pal(8, "Dark2"))
+```
+
+from the graph, I can quickly detect some interesting information, 10-30 minutes means it is a short visit, 21-30 years shows it suits for me, and min reservation means that I can make the reservation on the way I visit the place. So now, I can make my trip plan for the Statue of Liberty： I can go there on the day I leave New York if I still want to visit.
+
+## Conclusion
+
+After my test, I found The API request has the same speed as a search on Google Maps, so next time, we can use this analysis method to see if the topic on some place will attract us or not, and then make the trip decision.
